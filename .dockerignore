@@ -1,0 +1,36 @@
+# --- DOCKER SPECIFIC IGNORES ---
+.agents
+.git
+.github
+Dockerfile*
+docker-compose*
+**/*.db
+**/*.sqlite
+
+# --- BEGIN GITIGNORE ---
+# (Auto-generated from .gitignore. Do not edit this section directly.)
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Pytest / Coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Environments
+.env
+.venv
+env/
+venv/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Project specific temporary files
+tmp/
+
+# --- END GITIGNORE ---
