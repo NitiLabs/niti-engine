@@ -130,3 +130,17 @@ services:
 ## License
 
 This project is licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. See the [LICENSE](LICENSE) file for details.
+
+---
+
+## Git Hook (Auto-sync .dockerignore)
+
+We provide a helper script to automatically synchronize `.gitignore` rules into `.dockerignore` while keeping your Docker-specific files excluded. 
+
+To enable this pre-commit hook in your local Git repository, run this command from the root of the repository:
+
+```bash
+ln -sf ../../scripts/sync-dockerignore.sh .git/hooks/pre-commit
+```
+
+Whenever you run `git commit`, this hook runs automatically, updates `.dockerignore`, and stages it before committing.

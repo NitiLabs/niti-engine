@@ -1,12 +1,12 @@
 # Base environment
-FROM python:3.14-slim-trixie as base
+FROM python:3.14-slim-trixie AS base
 
 WORKDIR /app
 
-# Install dependencies needed for numpy/pandas compiling if necessary, though wheels usually cover it
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    && rm -rf /var/lib/apt/lists/*
+# Prevent Python from writing .pyc files to disk
+ENV PYTHONDONTWRITEBYTECODE=1
+# Prevent Python from buffering stdout/stderr (real-time logging)
+ENV PYTHONUNBUFFERED=1
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
