@@ -7,7 +7,41 @@ from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 from niti_core import run_simulation, VariableRequest, TraceConfig, Simulation
 
-logging.basicConfig(level=logging.INFO)
+from contextvars import ContextVar
+import uuid
+import time
+from fastapi import Request
+
+# Context variables to store request info for the current request
+user_id_ctx = ContextVar("user_id", default="system")
+request_id_ctx = ContextVar("request_id", default="none")
+
+class RequestContextFilter(logging.Filter):
+    """
+    Logging filter that injects the current user_id and request_id 
+    from contextvars into the log record.
+    """
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.user_id = user_id_ctx.get()
+        record.request_id = request_id_ctx.get()
+        return True
+
+def setup_logging():
+    log_format = "%(asctime)s - %(levelname)s - [%(user_id)s] [%(request_id)s] - %(filename)s:%(lineno)d - %(message)s"
+    request_filter = RequestContextFilter()
+    
+    # Configure root logger and all handlers
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+    
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", None):
+        l = logging.getLogger(name)
+        l.addFilter(request_filter)
+        for handler in l.handlers:
+            handler.addFilter(request_filter)
+            handler.setFormatter(logging.Formatter(log_format, datefmt="%Y-%m-%d %H:%M:%S"))
+
+setup_logging()
 logger = logging.getLogger(__name__)
 
 @asynccontextmanager
@@ -27,6 +61,36 @@ app = FastAPI(
     description="Standalone PolicyEngine calculation service",
     lifespan=lifespan
 )
+
+@app.middleware("http")
+async def add_request_context(request: Request, call_next):
+    """
+    Extract user_id and request_id from headers and set them in contextvars.
+    Generates a new request_id if not provided by the caller.
+    """
+    user_id = request.headers.get("X-User-ID", "anonymous")
+    request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
+    
+    user_token = user_id_ctx.set(user_id)
+    req_token = request_id_ctx.set(request_id)
+    start_time = time.perf_counter()
+    try:
+        response = await call_next(request)
+        process_time_ms = (time.perf_counter() - start_time) * 1000
+        
+        # Manual access log with context and duration
+        host = request.client.host if request.client else "unknown"
+        method = request.method
+        path = request.url.path
+        version = request.scope.get("http_version", "1.1")
+        logger.info(f'{host} - "{method} {path} HTTP/{version}" {response.status_code} ({process_time_ms:.2f}ms)')
+        
+        # Return the request ID in the response headers
+        response.headers["X-Request-ID"] = request_id
+        return response
+    finally:
+        user_id_ctx.reset(user_token)
+        request_id_ctx.reset(req_token)
 
 class VariableRequestModel(BaseModel):
     name: str
