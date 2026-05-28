@@ -34,9 +34,15 @@ def setup_logging():
     root = logging.getLogger()
     root.setLevel(logging.INFO)
     
+    if not root.handlers:
+        handler = logging.StreamHandler()
+        root.addHandler(handler)
+    
     for name in ("uvicorn", "uvicorn.error", "uvicorn.access", None):
         l = logging.getLogger(name)
         l.addFilter(request_filter)
+        if name is not None:
+            l.propagate = False
         for handler in l.handlers:
             handler.addFilter(request_filter)
             handler.setFormatter(logging.Formatter(log_format, datefmt="%Y-%m-%d %H:%M:%S"))
