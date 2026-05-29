@@ -5,7 +5,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
 from contextlib import asynccontextmanager
-from niti_core import run_simulation, VariableRequest, TraceConfig, Simulation
+from niti_core import run_simulation, VariableRequest, TraceConfig, Simulation, warmup_simulation_cache
 
 from contextvars import ContextVar
 import uuid
@@ -55,8 +55,7 @@ async def lifespan(app: FastAPI):
     # Warm up PolicyEngine on server startup so the first real API request is sub-0.3s
     logger.info("Warming up PolicyEngine simulation cache...")
     try:
-        _warmup_sim = Simulation(situation={"people": {"p": {"age": {"2025": 30}}}})
-        _warmup_sim.calculate("income_tax", 2025)
+        warmup_simulation_cache()
         logger.info("Warmup complete.")
     except Exception:
         logger.exception("Failed to warm up simulation")
@@ -128,15 +127,17 @@ def calculate_endpoint(req: CalculateRequest):
             VariableRequest(name=v.name, map_to=v.map_to)
             for v in req.variables
         ]
-        
+
         core_trace = None
         if req.trace_config:
+            logger.info(f"Trace config received: enabled={req.trace_config.enabled}, roots={req.trace_config.roots}")
             core_trace = TraceConfig(
                 enabled=req.trace_config.enabled,
                 roots=tuple(req.trace_config.roots)
             )
             
         # Run simulation
+        logger.debug(f"Running simulation for year {req.year}, situation={req.situation} with variables={core_vars} and trace_config={core_trace}")
         result = run_simulation(
             situation=req.situation,
             variables=core_vars,

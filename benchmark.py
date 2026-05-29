@@ -6,7 +6,7 @@ import numpy as np
 # Ensure we import local niti_core
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from niti_core import run_simulation, VariableRequest, TraceConfig
+from niti_core import run_simulation, VariableRequest, TraceConfig, warmup_simulation_cache
 
 def build_simple_situation(run_axes: bool = False):
     year = "2025"
@@ -88,9 +88,7 @@ def run_benchmark(mode="axes"):
 if __name__ == "__main__":
     # Perform a quick, untimed warmup to ensure lazy-loaded compilation is resolved before benchmarking
     try:
-        from niti_core import Simulation
-        _warmup_sim = Simulation(situation={"people": {"p": {"age": {"2025": 30}}}})
-        _warmup_sim.calculate("income_tax", 2025)
+        warmup_simulation_cache()
     except Exception:
         pass
 

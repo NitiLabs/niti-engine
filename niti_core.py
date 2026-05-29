@@ -212,4 +212,42 @@ def _filter_trace(
     return {k: v for k, v in full_trace.items() if k in reachable}
 
 
+def warmup_simulation_cache():
+    """Run a comprehensive warmup simulation for representative years (2025, 2026)
+    to force Numba JIT compilation and lazy-loading of parameters, geography datasets,
+    and state/ACA variables.
+    """
+    for year in (2025, 2026):
+        year_str = str(year)
+        warmup_situation = {
+            'people': {'p': {'age': {year_str: 45}, 'employment_income': {year_str: 10000.0}}},
+            'tax_units': {'t': {'members': ['p'], 'filing_status': {year_str: 'SINGLE'}}},
+            'families': {'f': {'members': ['p']}},
+            'households': {'h': {'members': ['p'], 'state_code': {year_str: 'CA'}}}
+        }
+        
+        sim = Simulation(situation=warmup_situation, tax_benefit_system=system)
+        
+        warmup_variables = [
+            'income_tax',
+            'niti_aca_repayment_limit',
+            'aca_magi',
+            'aca_required_contribution_percentage',
+            'slcsp',
+            'medicare_part_b_premium',
+            'base_part_b_premium',
+            'ca_income_tax'
+        ]
+        
+        for var_name in warmup_variables:
+            if var_name in system.variables:
+                kwargs = {}
+                if var_name in ('medicare_part_b_premium', 'base_part_b_premium'):
+                    kwargs["map_to"] = "tax_unit"
+                try:
+                    sim.calculate(var_name, year, **kwargs)
+                except Exception:
+                    pass
+
+
 

@@ -56,3 +56,32 @@ if "niti_aca_repayment_limits" not in system.parameters.children:
 
 if "niti_aca_repayment_limit" not in system.variables:
     system.add_variable(niti_aca_repayment_limit)
+
+# Optimize first_county_in_state.formula directly on the registered system variable instance.
+# Rebuilding the state-to-county mapping on every evaluation executes 150k pure-Python string matching loops, adding ~1.0s.
+# We replace it with a pre-computed O(1) cache lookup.
+if "first_county_in_state" in system.variables:
+    from policyengine_us.variables.household.demographic.geographic.county.county_enum import County
+    from policyengine_us.variables.household.demographic.geographic.state_code import StateCode
+
+    _state_to_first_county_cache = {}
+    for _state in StateCode:
+        _state_abbr = _state.value
+        _state_counties = [
+            _c for _c in County
+            if _c != County.UNKNOWN and _c.value.endswith(f", {_state_abbr}")
+        ]
+        if _state_counties:
+            _state_to_first_county_cache[_state_abbr] = min(_state_counties, key=lambda c: c.value)
+
+    def _patched_first_county_in_state_formula(household, period, parameters):
+        state_code_str = household("state_code_str", period)
+        result = [
+            _state_to_first_county_cache.get(state_abbr, County.UNKNOWN)
+            for state_abbr in state_code_str
+        ]
+        return np.array(result)
+
+    _var_instance = system.variables["first_county_in_state"]
+    for _date in list(_var_instance.formulas.keys()):
+        _var_instance.formulas[_date] = _patched_first_county_in_state_formula
