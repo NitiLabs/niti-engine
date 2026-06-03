@@ -7,47 +7,11 @@ from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 from niti_core import run_simulation, VariableRequest, TraceConfig, Simulation, warmup_simulation_cache
 
-from contextvars import ContextVar
+from logging_utils import user_id_ctx, request_id_ctx
 import uuid
 import time
 from fastapi import Request
 
-# Context variables to store request info for the current request
-user_id_ctx = ContextVar("user_id", default="system")
-request_id_ctx = ContextVar("request_id", default="none")
-
-class RequestContextFilter(logging.Filter):
-    """
-    Logging filter that injects the current user_id and request_id 
-    from contextvars into the log record.
-    """
-    def filter(self, record: logging.LogRecord) -> bool:
-        record.user_id = user_id_ctx.get()
-        record.request_id = request_id_ctx.get()
-        return True
-
-def setup_logging():
-    log_format = "%(asctime)s - %(levelname)s - [%(user_id)s] [%(request_id)s] - %(filename)s:%(lineno)d - %(message)s"
-    request_filter = RequestContextFilter()
-    
-    # Configure root logger and all handlers
-    root = logging.getLogger()
-    root.setLevel(logging.INFO)
-    
-    if not root.handlers:
-        handler = logging.StreamHandler()
-        root.addHandler(handler)
-    
-    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", None):
-        l = logging.getLogger(name)
-        l.addFilter(request_filter)
-        if name is not None:
-            l.propagate = False
-        for handler in l.handlers:
-            handler.addFilter(request_filter)
-            handler.setFormatter(logging.Formatter(log_format, datefmt="%Y-%m-%d %H:%M:%S"))
-
-setup_logging()
 logger = logging.getLogger(__name__)
 
 @asynccontextmanager
