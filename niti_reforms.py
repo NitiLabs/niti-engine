@@ -85,3 +85,19 @@ if "first_county_in_state" in system.variables:
     _var_instance = system.variables["first_county_in_state"]
     for _date in list(_var_instance.formulas.keys()):
         _var_instance.formulas[_date] = _patched_first_county_in_state_formula
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Massachusetts Public Pension Exemption Reform
+# ─────────────────────────────────────────────────────────────────────────────
+if "ma_gross_income" in system.variables:
+    _orig_ma_gross_income_formula = system.variables["ma_gross_income"].formulas[next(iter(system.variables["ma_gross_income"].formulas.keys()))]
+    
+    def _patched_ma_gross_income_formula(tax_unit, period, parameters):
+        orig_val = _orig_ma_gross_income_formula(tax_unit, period, parameters)
+        public_pension = tax_unit.sum(tax_unit.members("taxable_public_pension_income", period))
+        return np.maximum(0.0, orig_val - public_pension)
+        
+    _var = system.variables["ma_gross_income"]
+    for _date in list(_var.formulas.keys()):
+        _var.formulas[_date] = _patched_ma_gross_income_formula
+

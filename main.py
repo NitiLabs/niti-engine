@@ -93,7 +93,7 @@ def calculate_endpoint(req: CalculateRequest):
         ]
 
         core_trace = None
-        if req.trace_config:
+        if req.trace_config and req.trace_config.enabled:
             logger.info(f"Trace config received: enabled={req.trace_config.enabled}, roots={req.trace_config.roots}")
             core_trace = TraceConfig(
                 enabled=req.trace_config.enabled,
