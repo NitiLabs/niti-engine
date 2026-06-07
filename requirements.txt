@@ -1,6 +1,6 @@
 fastapi==0.135.1
 uvicorn==0.41.0
 uvloop==0.22.1
-policyengine-us==1.700.2
+policyengine-us==1.721.2 # 6/6/2026
 pydantic==2.13.4
 numpy==2.4.2
