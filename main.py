@@ -1,5 +1,8 @@
 import logging
 import numpy as np
+import functools
+import anyio
+from asyncio import Lock
 from typing import Optional, Any
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -79,12 +82,15 @@ class CalculateResponse(BaseModel):
     arrays: dict[str, list[Any]]
     trace: Optional[dict] = None
 
+# Create a global lock to serialize calculate requests
+calculate_lock = Lock()
+
 @app.get("/health")
-def health_check():
+async def health_check():
     return {"status": "ok"}
 
 @app.post("/calculate", response_model=CalculateResponse)
-def calculate_endpoint(req: CalculateRequest):
+async def calculate_endpoint(req: CalculateRequest):
     try:
         # Convert pydantic models to dataclasses used by niti_core
         core_vars = [
@@ -100,14 +106,19 @@ def calculate_endpoint(req: CalculateRequest):
                 roots=tuple(req.trace_config.roots)
             )
             
-        # Run simulation
-        logger.debug(f"Running simulation for year {req.year}, situation={req.situation} with variables={core_vars} and trace_config={core_trace}")
-        result = run_simulation(
-            situation=req.situation,
-            variables=core_vars,
-            year=req.year,
-            trace_config=core_trace
-        )
+        # Run simulation sequentially under lock, offloading CPU-bound tasks to threadpool.
+        # PolicyEngine is not thread-safe, so we don't run multiple simulations in parallel.
+        logger.debug(f"Queueing simulation for year {req.year}, situation={req.situation} with variables={core_vars} and trace_config={core_trace}")
+        
+        async with calculate_lock:
+            func = functools.partial(
+                run_simulation,
+                req.situation,
+                core_vars,
+                req.year,
+                trace_config=core_trace
+            )
+            result = await anyio.to_thread.run_sync(func)
         
         arrays_serializable = {
             k: np.nan_to_num(v, nan=0.0, posinf=1e10, neginf=-1e10).tolist() if hasattr(v, "tolist") else v

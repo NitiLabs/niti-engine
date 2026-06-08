@@ -201,20 +201,23 @@ def _filter_trace(
     # BFS from surviving roots to collect the full reachable subgraph.
     reachable: set[str] = set()
     queue = list(surviving_roots)
+    queued = set(surviving_roots)
     while queue:
         current_key = queue.pop(0)
-        if current_key not in reachable:
-            reachable.add(current_key)
-            node = full_trace.get(current_key)
-            if node and "dependencies" in node:
-                queue.extend(node["dependencies"])
+        reachable.add(current_key)
+        node = full_trace.get(current_key)
+        if node and "dependencies" in node:
+            for dep in node["dependencies"]:
+                if dep not in queued:
+                    queued.add(dep)
+                    queue.append(dep)
 
     return {k: v for k, v in full_trace.items() if k in reachable}
 
 
 def warmup_simulation_cache():
     """Run a comprehensive warmup simulation for representative years (2025, 2026)
-    to force Numba JIT compilation and lazy-loading of parameters, geography datasets,
+    to force NumExpr JIT compilation and lazy-loading of parameters, geography datasets,
     and state/ACA variables.
     """
     for year in (2025, 2026):
