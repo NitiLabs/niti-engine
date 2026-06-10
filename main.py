@@ -4,7 +4,7 @@ import functools
 import anyio
 from asyncio import Lock
 from typing import Optional, Any
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
 from pydantic import BaseModel, Field
 
 from contextlib import asynccontextmanager
@@ -13,12 +13,63 @@ from niti_core import run_simulation, VariableRequest, TraceConfig, Simulation, 
 from logging_utils import user_id_ctx, request_id_ctx
 import uuid
 import time
-from fastapi import Request
+import gc
+import os
+
+GC_CALCULATE_THRESHOLD2 = int(os.environ.get("GC_CALCULATE_THRESHOLD2", "25"))
+GC_CALCULATE_THRESHOLD1 = int(os.environ.get("GC_CALCULATE_THRESHOLD1", "5"))
+GC_HEALTH_THRESHOLD = int(os.environ.get("GC_HEALTH_THRESHOLD", "120"))
+
+calculate_counter = 0
+health_counter = 0
+
+async def cleanup_memory_task(is_calculate: bool):
+    global calculate_counter, health_counter
+    if not is_calculate and GC_HEALTH_THRESHOLD <= 0:
+        return
+        
+    async with calculate_lock:
+        start = time.perf_counter()
+        gc_type = None
+        
+        if is_calculate:
+            calculate_counter += 1
+            if calculate_counter % GC_CALCULATE_THRESHOLD1 == 0:
+                gc.collect(1)  # Gen 1 GC (Gen 0-1)
+                gc_type = "Gen 1 (Gen 0-1)"
+            elif GC_CALCULATE_THRESHOLD2 > 0 and calculate_counter >= GC_CALCULATE_THRESHOLD2:
+                gc.collect()  # Full GC (Gen 2)
+                calculate_counter = 0
+                health_counter = 0
+                gc_type = "Full (Gen 0-2)"
+            else:
+                gc.collect(0)  # Gen 0 GC (Gen 0)
+                gc_type = "Gen 0 (Gen 0)"
+        else:
+            health_counter += 1
+            if health_counter >= GC_HEALTH_THRESHOLD:
+                gc.collect()  # Full GC (Gen 2)
+                calculate_counter = 0
+                health_counter = 0
+                gc_type = "Full (Gen 0-2)"
+                
+        if gc_type:
+            duration_ms = (time.perf_counter() - start) * 1000
+            trigger_type = "calculate" if is_calculate else "health"
+            logger.info(
+                f"Garbage collection ({gc_type}) triggered by {trigger_type} "
+                f"completed in {duration_ms:.2f}ms. "
+                f"Counters: calc={calculate_counter}, health={health_counter}"
+            )
 
 logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Disable automatic garbage collection
+    gc.set_threshold(0)
+    logger.info("Disabled automatic garbage collection (GC).")
+    
     # Warm up PolicyEngine on server startup so the first real API request is sub-0.3s
     logger.info("Warming up PolicyEngine simulation cache...")
     try:
@@ -86,11 +137,12 @@ class CalculateResponse(BaseModel):
 calculate_lock = Lock()
 
 @app.get("/health")
-async def health_check():
+async def health_check(background_tasks: BackgroundTasks):
+    background_tasks.add_task(cleanup_memory_task, False)
     return {"status": "ok"}
 
 @app.post("/calculate", response_model=CalculateResponse)
-async def calculate_endpoint(req: CalculateRequest):
+async def calculate_endpoint(req: CalculateRequest, background_tasks: BackgroundTasks):
     try:
         # Convert pydantic models to dataclasses used by niti_core
         core_vars = [
@@ -124,6 +176,8 @@ async def calculate_endpoint(req: CalculateRequest):
             k: np.nan_to_num(v, nan=0.0, posinf=1e10, neginf=-1e10).tolist() if hasattr(v, "tolist") else v
             for k, v in result.arrays.items()
         }
+        
+        background_tasks.add_task(cleanup_memory_task, True)
         
         return CalculateResponse(
             arrays=arrays_serializable,

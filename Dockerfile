@@ -1,5 +1,5 @@
 # Base environment
-FROM python:3.14-slim-trixie AS base
+FROM python:3.14.5-slim-trixie AS base
 
 WORKDIR /app
 
