@@ -1,5 +1,5 @@
 import numpy as np
-from policyengine_us.model_api import Variable, Reform, TaxUnit, YEAR, ParameterNode
+from policyengine_us.model_api import Variable, Reform, TaxUnit, Person, YEAR, ParameterNode
 from policyengine_us.variables.household.demographic.tax_unit.filing_status import filing_status
 
 aca_limits_data = {
@@ -100,4 +100,40 @@ if "ma_gross_income" in system.variables:
     _var = system.variables["ma_gross_income"]
     for _date in list(_var.formulas.keys()):
         _var.formulas[_date] = _patched_ma_gross_income_formula
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# US Government Interest & Dividends Split Patch
+# ─────────────────────────────────────────────────────────────────────────────
+class us_govt_interest_income_person(Variable):
+    value_type = float
+    entity = Person
+    label = "Interest from U.S. government obligations"
+    definition_period = YEAR
+
+
+class us_govt_dividends_person(Variable):
+    value_type = float
+    entity = Person
+    label = "Dividends from U.S. government obligations"
+    definition_period = YEAR
+
+
+if "us_govt_interest_income_person" not in system.variables:
+    system.add_variable(us_govt_interest_income_person)
+
+if "us_govt_dividends_person" not in system.variables:
+    system.add_variable(us_govt_dividends_person)
+
+if "us_govt_interest_person" in system.variables:
+    def _patched_us_govt_interest_person_formula(person, period, parameters):
+        interest = person("us_govt_interest_income_person", period)
+        dividends = person("us_govt_dividends_person", period)
+        return interest + dividends
+
+    _var = system.variables["us_govt_interest_person"]
+    _var.formulas = {
+        "2015-01-01": _patched_us_govt_interest_person_formula
+    }
+
 
