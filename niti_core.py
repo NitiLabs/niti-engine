@@ -241,13 +241,14 @@ def warmup_simulation_cache():
             'slcsp',
             'medicare_part_b_premium',
             'base_part_b_premium',
+            'income_adjusted_part_d_premium_surcharge',
             'ca_income_tax'
         ]
         
         for var_name in warmup_variables:
             if var_name in system.variables:
                 kwargs = {}
-                if var_name in ('medicare_part_b_premium', 'base_part_b_premium'):
+                if var_name in ('medicare_part_b_premium', 'base_part_b_premium', 'income_adjusted_part_d_premium_surcharge'):
                     kwargs["map_to"] = "tax_unit"
                 try:
                     sim.calculate(var_name, year, **kwargs)
