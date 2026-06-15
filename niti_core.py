@@ -234,6 +234,8 @@ def warmup_simulation_cache():
         warmup_variables = [
             'income_tax',
             'niti_aca_repayment_limit',
+            'niti_aca_premium_tax_credit',
+            'niti_net_aca_tax',
             'aca_magi',
             'aca_required_contribution_percentage',
             'slcsp',

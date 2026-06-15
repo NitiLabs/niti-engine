@@ -137,3 +137,102 @@ if "us_govt_interest_person" in system.variables:
     }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Custom Niti ACA Variables
+# ─────────────────────────────────────────────────────────────────────────────
+
+class niti_aca_yearly_premium_paid(Variable):
+    value_type = float
+    entity = TaxUnit
+    label = "Total out-of-pocket premium paid over the year"
+    definition_period = YEAR
+    default_value = 0.0
+
+
+class niti_aca_enrolled_months(Variable):
+    value_type = int
+    entity = TaxUnit
+    label = "Months enrolled in ACA"
+    definition_period = YEAR
+    default_value = 12
+
+
+class niti_advance_premium_tax_credit(Variable):
+    value_type = float
+    entity = TaxUnit
+    label = "Advance premium tax credit reported"
+    definition_period = YEAR
+    default_value = 0.0
+
+
+class niti_aca_premium_tax_credit(Variable):
+    value_type = float
+    entity = TaxUnit
+    label = "ACA Premium Tax Credit (Gross)"
+    definition_period = YEAR
+    
+    def formula(tax_unit, period, parameters):
+        months = tax_unit("niti_aca_enrolled_months", period)
+        
+        # Check if anyone in the tax unit is eligible for PTC
+        any_eligible = tax_unit.sum(tax_unit.members("is_aca_ptc_eligible", period)) > 0
+        
+        # 1. SLCSP Benchmark for the period We multiply by the enrollment fraction
+        # to get the actual benchmark for the period.
+        annual_slcsp = tax_unit("slcsp", period)
+        ptc_benchmark = annual_slcsp * (months / 12.0)
+        
+        # 2. Scale up if advance premium tax credit reported is larger than SLCSP
+        aptc = tax_unit("niti_advance_premium_tax_credit", period)
+        ptc_benchmark = np.maximum(ptc_benchmark, aptc)
+        
+        # 3. Required contribution for the period
+        magi = tax_unit("aca_magi", period)
+        applicable_pct = tax_unit("aca_required_contribution_percentage", period)
+        contribution_for_period = (magi * applicable_pct) * (months / 12.0)
+        
+        total_gross_ptc = np.maximum(0.0, ptc_benchmark - contribution_for_period)
+        
+        # 4. Cap at total premium price (paid + advance)
+        premium_paid = tax_unit("niti_aca_yearly_premium_paid", period)
+        annual_plan_premium = premium_paid + aptc
+        total_gross_ptc = np.minimum(total_gross_ptc, annual_plan_premium)
+        
+        # ACA eligibility depends on enrolled months > 0 and having eligible members
+        return np.where(any_eligible & (months > 0), total_gross_ptc, 0.0)
+
+
+class niti_net_aca_tax(Variable):
+    value_type = float
+    entity = TaxUnit
+    label = "Net ACA Tax Impact (Repayment Owed or Refund Claimed)"
+    definition_period = YEAR
+    
+    def formula(tax_unit, period, parameters):
+        gross_ptc = tax_unit("niti_aca_premium_tax_credit", period)
+        aptc = tax_unit("niti_advance_premium_tax_credit", period)
+        
+        # Negative tax impact (refund)
+        refund_impact = aptc - gross_ptc
+        
+        # Positive tax impact (repayment capped by limit)
+        repayment_limit = tax_unit("niti_aca_repayment_limit", period)
+        raw_repayment = aptc - gross_ptc
+        repayment_impact = np.minimum(aptc, np.minimum(raw_repayment, repayment_limit))
+        
+        return np.where(gross_ptc < aptc, repayment_impact, refund_impact)
+
+
+for var_class in [
+    niti_aca_yearly_premium_paid,
+    niti_aca_enrolled_months,
+    niti_advance_premium_tax_credit,
+    niti_aca_premium_tax_credit,
+    niti_net_aca_tax
+]:
+    if var_class.__name__ not in system.variables:
+        system.add_variable(var_class)
+
+
+
+
