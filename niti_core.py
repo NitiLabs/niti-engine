@@ -239,7 +239,7 @@ def warmup_simulation_cache():
             'aca_magi',
             'aca_required_contribution_percentage',
             'slcsp',
-            'medicare_part_b_premium',
+            'gross_medicare_part_b_premium',
             'base_part_b_premium',
             'income_adjusted_part_d_premium_surcharge',
             'ca_income_tax'
@@ -248,7 +248,7 @@ def warmup_simulation_cache():
         for var_name in warmup_variables:
             if var_name in system.variables:
                 kwargs = {}
-                if var_name in ('medicare_part_b_premium', 'base_part_b_premium', 'income_adjusted_part_d_premium_surcharge'):
+                if var_name in ('gross_medicare_part_b_premium', 'base_part_b_premium', 'income_adjusted_part_d_premium_surcharge'):
                     kwargs["map_to"] = "tax_unit"
                 try:
                     sim.calculate(var_name, year, **kwargs)
