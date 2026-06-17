@@ -4,7 +4,7 @@ import functools
 import anyio
 from asyncio import Lock
 from typing import Optional, Any
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Response
 from pydantic import BaseModel, Field
 
 from contextlib import asynccontextmanager
@@ -64,6 +64,15 @@ async def cleanup_memory_task(is_calculate: bool):
 
 logger = logging.getLogger(__name__)
 
+# Prometheus Metrics instrumentation
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, Histogram
+
+HTTP_REQUEST_DURATION = Histogram(
+    "http_request_duration_seconds",
+    "HTTP request duration in seconds",
+    ["method", "endpoint", "status"]
+)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Disable automatic garbage collection
@@ -100,11 +109,20 @@ async def add_request_context(request: Request, call_next):
     try:
         response = await call_next(request)
         process_time_ms = (time.perf_counter() - start_time) * 1000
+        process_time_s = process_time_ms / 1000.0
+        
+        path = request.url.path
+        # Record metrics (skip health checks, metrics, and root to avoid noise)
+        if path not in ["/health", "/metrics", "/"]:
+            HTTP_REQUEST_DURATION.labels(
+                method=request.method,
+                endpoint=path,
+                status=response.status_code
+            ).observe(process_time_s)
         
         # Manual access log with context and duration
         host = request.client.host if request.client else "unknown"
         method = request.method
-        path = request.url.path
         version = request.scope.get("http_version", "1.1")
         logger.info(f'{host} - "{method} {path} HTTP/{version}" {response.status_code} ({process_time_ms:.2f}ms)')
         
@@ -140,6 +158,10 @@ calculate_lock = Lock()
 async def health_check(background_tasks: BackgroundTasks):
     background_tasks.add_task(cleanup_memory_task, False)
     return {"status": "ok"}
+
+@app.get("/metrics")
+def metrics():
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.post("/calculate", response_model=CalculateResponse)
 async def calculate_endpoint(req: CalculateRequest, background_tasks: BackgroundTasks):

@@ -4,3 +4,4 @@ uvloop==0.22.1
 policyengine-us==1.722.4 # 6/8/2026
 pydantic==2.13.4
 numpy==2.4.2
+prometheus-client==0.25.0
