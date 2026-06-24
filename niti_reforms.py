@@ -236,6 +236,7 @@ for var_class in [
 
 # ─────────────────────────────────────────────────────────────────────────────
 # California AMT Itemized Deductions Double Add-back Patch
+# https://github.com/PolicyEngine/policyengine-us/issues/8742
 # ─────────────────────────────────────────────────────────────────────────────
 from policyengine_us.model_api import StateCode, USD
 
@@ -267,6 +268,20 @@ if "ca_pre_exemption_amti" in system.variables:
     system.variables["ca_pre_exemption_amti"].formulas = {
         "2015-01-01": _patched_ca_pre_exemption_amti_formula
     }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# California AMT Mortgage Interest Adjustment Patch
+# https://github.com/PolicyEngine/policyengine-us/issues/8658
+# ─────────────────────────────────────────────────────────────────────────────
+if "ca_pre_exemption_amti" in system.variables:
+    sources_param = system.parameters.gov.states.ca.tax.income.amt.amti.sources
+    for instant in sources_param.values_list:
+        instant.value = [
+            "non_deductible_mortgage_interest" if var == "mortgage_interest" else var
+            for var in instant.value
+        ]
+
 
 
 
