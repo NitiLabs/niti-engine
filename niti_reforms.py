@@ -234,5 +234,42 @@ for var_class in [
         system.add_variable(var_class)
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# California AMT Itemized Deductions Double Add-back Patch
+# ─────────────────────────────────────────────────────────────────────────────
+from policyengine_us.model_api import StateCode, USD
+
+class ca_itemized_deductions_limitation(Variable):
+    value_type = float
+    entity = TaxUnit
+    label = "California itemized deductions limitation"
+    unit = USD
+    definition_period = YEAR
+    defined_for = StateCode.CA
+
+    def formula(tax_unit, period, parameters):
+        pre_lim = tax_unit("ca_itemized_deductions_pre_limitation", period)
+        post_lim = tax_unit("ca_itemized_deductions", period)
+        return np.maximum(0.0, pre_lim - post_lim)
+
+
+if "ca_itemized_deductions_limitation" not in system.variables:
+    system.add_variable(ca_itemized_deductions_limitation)
+
+if "ca_pre_exemption_amti" in system.variables:
+    def _patched_ca_pre_exemption_amti_formula(tax_unit, period, parameters):
+        amti_adjustments = tax_unit("ca_amti_adjustments", period)
+        taxable_income = tax_unit("ca_taxable_income", period)
+        limitation = tax_unit("ca_itemized_deductions_limitation", period)
+        return amti_adjustments + taxable_income - limitation
+
+    # Patch the formula for CA AMT calculation
+    system.variables["ca_pre_exemption_amti"].formulas = {
+        "2015-01-01": _patched_ca_pre_exemption_amti_formula
+    }
+
+
+
+
 
 
