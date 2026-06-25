@@ -68,9 +68,11 @@ class VariableRequest:
         name:    PolicyEngine variable name (e.g. ``"income_tax"``).
         map_to:  Optional entity to map to (e.g. ``"tax_unit"``).
                  Passed straight through to ``Simulation.calculate(…, map_to=)``.
+        period:  Optional period to calculate the variable for.
     """
     name: str
     map_to: Optional[str] = None
+    period: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -143,7 +145,8 @@ def run_simulation(
         kwargs = {}
         if var.map_to is not None:
             kwargs["map_to"] = var.map_to
-        result.arrays[var.name] = sim.calculate(var.name, year, **kwargs)
+        calc_year = int(var.period) if var.period is not None else year
+        result.arrays[var.name] = sim.calculate(var.name, calc_year, **kwargs)
 
     if run_trace and trace_config is not None:
         result.trace = _filter_trace(
@@ -172,9 +175,9 @@ def _filter_trace(
     to a few hundred nodes / 100–300 KB, which matters when the trace is
     serialized over the wire from niti-engine → tax-api.
     """
-    # e.g. ("income_tax", "ca_income_tax", "aca_ptc") → ("income_tax<2024", ...)
+    # e.g. ("income_tax", "ca_income_tax", "aca_ptc") → ("income_tax<", ...)
     always_keep_prefixes = tuple(
-        f"{root}<{year}" for root in trace_roots
+        f"{root}<" for root in trace_roots
     )
 
     # Identify which trace keys are dependency targets (i.e. not roots).

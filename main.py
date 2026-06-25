@@ -136,6 +136,7 @@ async def add_request_context(request: Request, call_next):
 class VariableRequestModel(BaseModel):
     name: str
     map_to: Optional[str] = None
+    period: Optional[str] = None
 
 class TraceConfigModel(BaseModel):
     enabled: bool = False
@@ -168,7 +169,7 @@ async def calculate_endpoint(req: CalculateRequest, background_tasks: Background
     try:
         # Convert pydantic models to dataclasses used by niti_core
         core_vars = [
-            VariableRequest(name=v.name, map_to=v.map_to)
+            VariableRequest(name=v.name, map_to=v.map_to, period=v.period)
             for v in req.variables
         ]
 
