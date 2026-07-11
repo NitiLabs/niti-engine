@@ -3,14 +3,10 @@ niti_core: Optimized version of PolicyEngine for household use case.
 """
 
 import logging
-import os
+import time
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
-
-# If county FIPS dataset already exists locally, we can run in offline mode to prevent Hugging Face from making network requests
-if Path("data/county_fips_2020.csv.gz").exists():
-    os.environ["HF_HUB_OFFLINE"] = "1"
 
 # ── PolicyEngine imports (isolated here) ─────────────────────────────────
 from policyengine_us import Simulation
@@ -19,30 +15,12 @@ from policyengine_core.simulations.simulation_macro_cache import SimulationMacro
 import niti_reforms  # noqa: F401  – registers custom ACA variable globally
 from policyengine_us.system import system
 
-# ── Monkey-patch ─────────────────────────────────────────────────────────
-# 1. SimulationMacroCache calls importlib.metadata.version() on EVERY variable
-# calculation, which is extremely slow in Docker.  We don't use MacroCache,
-# so it is safe to no-op the __init__.
-SimulationMacroCache.__init__ = lambda self, tax_benefit_system: None
-
-# 2. Monkey-patch Hugging Face dataset downloads to bypass Hub metadata calls if local file exists.
-# This prevents network roundtrips during county-based variable evaluations.
-import policyengine_core.tools.hugging_face
 import policyengine_us.tools.geography.county_helpers
 
-original_download = policyengine_core.tools.hugging_face.download_huggingface_dataset
+logger = logging.getLogger(__name__)
 
-def patched_download_huggingface_dataset(repo: str, repo_filename: str, version: str = None, local_dir: Optional[str] = None):
-    target_dir = Path(local_dir) if local_dir else Path("data")
-    local_path = target_dir / repo_filename
-    if local_path.exists():
-        return str(local_path)
-    return original_download(repo, repo_filename, version, local_dir)
-
-policyengine_core.tools.hugging_face.download_huggingface_dataset = patched_download_huggingface_dataset
-policyengine_us.tools.geography.county_helpers.download_huggingface_dataset = patched_download_huggingface_dataset
-
-# 3. Lazy-caching county FIPS dataset loading.
+# ── Monkey-patch ─────────────────────────────────────────────────────────
+# 1. Lazy-caching county FIPS dataset loading.
 # This prevents filesystem reading/parsing overhead on subsequent requests.
 _orig_load_county_fips = policyengine_us.tools.geography.county_helpers.load_county_fips_dataset
 _cached_county_fips_df = None
@@ -50,12 +28,26 @@ _cached_county_fips_df = None
 def _lazy_load_county_fips_dataset():
     global _cached_county_fips_df
     if _cached_county_fips_df is None:
-        _cached_county_fips_df = _orig_load_county_fips()
+        start_time = time.time()
+        df = _orig_load_county_fips()
+        if df is None or len(df) <= 3200:
+            row_count = len(df) if df is not None else 0
+            raise RuntimeError(
+                f"County FIPS dataset load error: expected > 3200 rows, but got {row_count} rows."
+            )
+        _cached_county_fips_df = df
+        duration = time.time() - start_time
+        logger.info(f"Loaded county FIPS dataset in {duration:.4f} seconds. Size/Shape: {_cached_county_fips_df.shape}")
     return _cached_county_fips_df
 
 policyengine_us.tools.geography.county_helpers.load_county_fips_dataset = _lazy_load_county_fips_dataset
 
-logger = logging.getLogger(__name__)
+# Patch the dynamic module namespaces of the registered county formulas inside system:
+_county_var = system.variables.get("county")
+if _county_var:
+    for formula in _county_var.formulas.values():
+        if "load_county_fips_dataset" in formula.__globals__:
+            formula.__globals__["load_county_fips_dataset"] = _lazy_load_county_fips_dataset
 
 
 # ── Public data structures ───────────────────────────────────────────────
@@ -229,7 +221,7 @@ def warmup_simulation_cache():
             'people': {'p': {'age': {year_str: 45}, 'employment_income': {year_str: 10000.0}}},
             'tax_units': {'t': {'members': ['p'], 'filing_status': {year_str: 'SINGLE'}}},
             'families': {'f': {'members': ['p']}},
-            'households': {'h': {'members': ['p'], 'state_code': {year_str: 'CA'}}}
+            'households': {'h': {'members': ['p'], 'state_code': {year_str: 'CA'}, 'county_fips': {year_str: '06085'}}}
         }
         
         sim = Simulation(situation=warmup_situation, tax_benefit_system=system)
@@ -257,6 +249,3 @@ def warmup_simulation_cache():
                     sim.calculate(var_name, year, **kwargs)
                 except Exception:
                     pass
-
-
-
