@@ -1,7 +1,5 @@
 import logging
 import numpy as np
-import functools
-import anyio
 from asyncio import Lock
 from typing import Optional, Any
 from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Response
@@ -161,11 +159,17 @@ async def health_check(background_tasks: BackgroundTasks):
     return {"status": "ok"}
 
 @app.get("/metrics")
-def metrics():
+async def metrics():
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.post("/calculate", response_model=CalculateResponse)
-async def calculate_endpoint(req: CalculateRequest, background_tasks: BackgroundTasks):
+async def calculate_endpoint(req: CalculateRequest, background_tasks: BackgroundTasks, request: Request):
+    profile = request.headers.get("X-Profile") == "true"
+    if profile:
+        import cProfile, pstats
+        pr = cProfile.Profile()
+        pr.enable()
+
     try:
         # Convert pydantic models to dataclasses used by niti_core
         core_vars = [
@@ -181,19 +185,17 @@ async def calculate_endpoint(req: CalculateRequest, background_tasks: Background
                 roots=tuple(req.trace_config.roots)
             )
             
-        # Run simulation sequentially under lock, offloading CPU-bound tasks to threadpool.
-        # PolicyEngine is not thread-safe, so we don't run multiple simulations in parallel.
+        # Run simulation sequentially under lock. PolicyEngine is not thread-safe,
+        # so we don't run multiple simulations in parallel.
         logger.debug(f"Queueing simulation for year {req.year}, situation={req.situation} with variables={core_vars} and trace_config={core_trace}")
         
         async with calculate_lock:
-            func = functools.partial(
-                run_simulation,
+            result = run_simulation(
                 req.situation,
                 core_vars,
                 req.year,
                 trace_config=core_trace
             )
-            result = await anyio.to_thread.run_sync(func)
         
         arrays_serializable = {
             k: np.nan_to_num(v, nan=0.0, posinf=1e10, neginf=-1e10).tolist() if hasattr(v, "tolist") else v
@@ -202,10 +204,22 @@ async def calculate_endpoint(req: CalculateRequest, background_tasks: Background
         
         background_tasks.add_task(cleanup_memory_task, True)
         
+        if profile:
+            pr.disable()
+            with open("/app/tmp/api_profile_stats.txt", "w") as f:
+                ps = pstats.Stats(pr, stream=f).sort_stats('cumulative')
+                ps.print_stats(150)
+            logger.info("Saved API profile to tmp/api_profile_stats.txt")
+
         return CalculateResponse(
             arrays=arrays_serializable,
             trace=result.trace
         )
     except Exception as e:
+        if profile:
+            try:
+                pr.disable()
+            except Exception:
+                pass
         logger.exception("Error during simulation")
         raise HTTPException(status_code=500, detail=str(e))
