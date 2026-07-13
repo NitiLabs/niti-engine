@@ -123,8 +123,32 @@ def run_simulation(
         A ``SimulationResult`` containing the requested arrays and an
         optional trace.
     """
+    import copy
+    situation = copy.deepcopy(situation)
+
+    overrides = []
+    entities = ["people", "tax_units", "families", "households"]
+    for entity in entities:
+        if entity not in situation:
+            continue
+        for entity_id, entity_dict in situation[entity].items():
+            keys_to_remove = []
+            for var_name, period_dict in entity_dict.items():
+                if var_name == "members":
+                    continue
+                if isinstance(period_dict, dict):
+                    for period, val in period_dict.items():
+                        if isinstance(val, (list, tuple)):
+                            overrides.append((var_name, period, val))
+                            keys_to_remove.append(var_name)
+            for k in keys_to_remove:
+                del entity_dict[k]
+
     run_trace = trace_config.enabled if trace_config is not None else False
     sim = Simulation(situation=situation, tax_benefit_system=system, trace=run_trace)
+
+    for var_name, period, val in overrides:
+        sim.set_input(var_name, period, val)
 
     result = SimulationResult()
 
