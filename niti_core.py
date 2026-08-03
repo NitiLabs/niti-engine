@@ -235,11 +235,11 @@ def _filter_trace(
 
 
 def warmup_simulation_cache():
-    """Run a comprehensive warmup simulation for representative years (2025, 2026)
+    """Run a comprehensive warmup simulation for representative years (2025, 2026, 2027)
     to force NumExpr JIT compilation and lazy-loading of parameters, geography datasets,
     and state/ACA variables.
     """
-    for year in (2025, 2026):
+    for year in (2025, 2026, 2027):
         year_str = str(year)
         warmup_situation = {
             'people': {'p': {'age': {year_str: 45}, 'employment_income': {year_str: 10000.0}}},
