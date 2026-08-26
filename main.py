@@ -13,6 +13,19 @@ import uuid
 import time
 import gc
 import os
+import importlib.metadata
+
+def get_policyengine_us_version() -> str:
+    try:
+        return importlib.metadata.version("policyengine-us")
+    except Exception:
+        try:
+            import policyengine_us
+            return getattr(policyengine_us, "__version__", "unknown")
+        except Exception:
+            return "unknown"
+
+POLICYENGINE_US_VERSION = get_policyengine_us_version()
 
 GC_CALCULATE_THRESHOLD2 = int(os.environ.get("GC_CALCULATE_THRESHOLD2", "25"))
 GC_CALCULATE_THRESHOLD1 = int(os.environ.get("GC_CALCULATE_THRESHOLD1", "5"))
@@ -76,6 +89,7 @@ async def lifespan(app: FastAPI):
     # Disable automatic garbage collection
     gc.set_threshold(0)
     logger.info("Disabled automatic garbage collection (GC).")
+    logger.info(f"policyengine-us version: {POLICYENGINE_US_VERSION}")
     
     # Warm up PolicyEngine on server startup so the first real API request is sub-0.3s
     logger.info("Warming up PolicyEngine simulation cache...")
@@ -156,7 +170,10 @@ calculate_lock = Lock()
 @app.get("/health")
 async def health_check(background_tasks: BackgroundTasks):
     background_tasks.add_task(cleanup_memory_task, False)
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "pe_version": POLICYENGINE_US_VERSION,
+    }
 
 @app.get("/metrics")
 async def metrics():
