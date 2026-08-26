@@ -232,3 +232,86 @@ for var_class in [
 ]:
     if var_class.__name__ not in system.variables:
         system.add_variable(var_class)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Temporary Fix: Include taxable_roth_conversions in State Incomes & Exclusions
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _patch_parameter_source_list(param, var_name="taxable_roth_conversions"):
+    """Appends var_name to ParameterAtInstant values so Simulation clones inherit it."""
+    for item in getattr(param, "values_list", []):
+        if isinstance(item.value, list) and var_name not in item.value:
+            item.value = list(item.value) + [var_name]
+
+# Category A: State Gross Income / AGI definitions
+# https://github.com/PolicyEngine/policyengine-us/issues/9352
+_patch_parameter_source_list(system.parameters.gov.states.al.tax.income.agi.gross_income_sources)
+_patch_parameter_source_list(system.parameters.gov.states.ar.tax.income.gross_income.sources.individual)
+_patch_parameter_source_list(system.parameters.gov.states.ar.tax.income.gross_income.sources.joint)
+_patch_parameter_source_list(system.parameters.gov.states.nj.tax.income.gross_income.non_negative_sources)
+
+# Category B: Senior / Retirement income exclusions
+# https://github.com/PolicyEngine/policyengine-us/issues/9353
+_patch_parameter_source_list(system.parameters.gov.states.co.tax.income.subtractions.pension.income_sources)
+_patch_parameter_source_list(system.parameters.gov.states.ga.tax.income.agi.exclusions.retirement.sources)
+_patch_parameter_source_list(system.parameters.gov.states.ky.tax.income.exclusions.pension_income.other_retirement_income_sources)
+
+# Alabama Senior Retirement Exemption (Schedule RS / Ala. Code § 40-18-19(a)(13))
+if "al_retirement_exemption_person" in system.variables:
+    def _patched_al_retirement_exemption_formula(person, period, parameters):
+        p = parameters(period).gov.states.al.tax.income.exemptions.retirement
+        retirement_income = (
+            person("taxable_retirement_distributions", period)
+            + person("taxable_pension_income", period)
+            + person("taxable_roth_conversions", period)
+        )
+        return np.minimum(retirement_income, p.cap)
+    _al_ret_var = system.variables["al_retirement_exemption_person"]
+    for _d in list(_al_ret_var.formulas.keys()):
+        _al_ret_var.formulas[_d] = _patched_al_retirement_exemption_formula
+
+
+# Arkansas Senior Retirement Exemption
+if "ar_retirement_or_disability_benefits_exemption_person" in system.variables:
+    def _patched_ar_retirement_exemption_formula(person, period, parameters):
+        p = parameters(period).gov.irs.income.exemption.traditional_distribution
+        head_or_spouse = person("is_tax_unit_head_or_spouse", period)
+        disability_benefits_and_taxable_pensions = (
+            person("disability_benefits", period) + person("taxable_pension_income", period)
+        )
+        ira_age_eligible = person("age", period) >= p.age_threshold
+        age_eligible_ira_distributions = ira_age_eligible * (
+            person("taxable_ira_distributions", period) + person("taxable_roth_conversions", period)
+        )
+        return head_or_spouse * (
+            disability_benefits_and_taxable_pensions + age_eligible_ira_distributions
+        )
+    _ar_var = system.variables["ar_retirement_or_disability_benefits_exemption_person"]
+    for _d in list(_ar_var.formulas.keys()):
+        _ar_var.formulas[_d] = _patched_ar_retirement_exemption_formula
+
+# Wisconsin Senior Retirement Exemption
+if "wi_retirement_income_exclusion_amount" in system.variables:
+    def _patched_wi_retirement_formula(tax_unit, period, parameters):
+        p = parameters(period).gov.states.wi.tax.income.subtractions.retirement_income.exclusion
+        person = tax_unit.members
+        age = person("age", period)
+        head_or_spouse = person("is_tax_unit_head_or_spouse", period)
+        eligible = (age >= p.min_age) * head_or_spouse
+        pension = person("taxable_pension_income", period)
+        ira = person("taxable_ira_distributions", period) + person("taxable_roth_conversions", period)
+        person_ret_income = (pension + ira) * eligible
+        filing_status = tax_unit("filing_status", period)
+        is_joint = filing_status == filing_status.possible_values.JOINT
+        both_eligible = tax_unit.sum(eligible) >= 2
+        total_ret_income = tax_unit.sum(person_ret_income)
+        joint_both_amount = np.minimum(p.max_amount.joint, total_ret_income)
+        per_person_capped = np.minimum(p.max_amount.single, person_ret_income)
+        standard_amount = tax_unit.sum(per_person_capped)
+        return np.where(is_joint & both_eligible, joint_both_amount, standard_amount)
+
+    _wi_var = system.variables["wi_retirement_income_exclusion_amount"]
+    for _d in list(_wi_var.formulas.keys()):
+        _wi_var.formulas[_d] = _patched_wi_retirement_formula
+
