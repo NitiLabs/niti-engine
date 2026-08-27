@@ -95,7 +95,10 @@ async def lifespan(app: FastAPI):
     logger.info("Warming up PolicyEngine simulation cache...")
     try:
         warmup_simulation_cache()
-        logger.info("Warmup complete.")
+        gc.collect(2)
+        # Freeze the loaded objects to speed up future gen 2 GCs.
+        gc.freeze()
+        logger.info("Warmup and gc.freeze() complete.")
     except Exception:
         logger.exception("Failed to warm up simulation")
     yield
