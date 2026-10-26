@@ -157,9 +157,23 @@ class niti_aca_premium_tax_credit(Variable):
     
     def formula(tax_unit, period, parameters):
         months = tax_unit("niti_aca_enrolled_months", period)
+        aptc = tax_unit("niti_advance_premium_tax_credit", period)
         
-        # Check if anyone in the tax unit is eligible for PTC
-        any_eligible = tax_unit.sum(tax_unit.members("is_aca_ptc_eligible", period)) > 0
+        # Check if anyone in the tax unit is eligible for PTC:
+        # 1. Standard PolicyEngine eligibility
+        standard_eligible = tax_unit.sum(tax_unit.members("is_aca_ptc_eligible", period)) > 0
+        
+        # 2. Form 8962 Line 6 Safe Harbor (26 CFR § 1.36B-2(b)(6)):
+        # Taxpayers who enrolled in ACA (pays_aca_premium) and received advance credit payments (APTC > 0)
+        # based on an initial estimate of >= 100% FPL are treated as eligible applicable taxpayers
+        # even if their actual year-end income is below 100% FPL.
+        # Note: Married Filing Separately is still disqualified from PTC.
+        has_enrolled_member = tax_unit.sum(tax_unit.members("pays_aca_premium", period)) > 0
+        is_mfs = tax_unit("filing_status", period) == filing_status.possible_values.SEPARATE
+        fpl_pct = tax_unit("aca_magi_fraction", period)
+        below_100_fpl_safe_harbor = has_enrolled_member & ~is_mfs & (fpl_pct < 1.0) & (aptc > 0)
+        
+        any_eligible = standard_eligible | below_100_fpl_safe_harbor
         
         # 1. SLCSP Benchmark for the period We multiply by the enrollment fraction
         # to get the actual benchmark for the period.
@@ -167,7 +181,6 @@ class niti_aca_premium_tax_credit(Variable):
         ptc_benchmark = annual_slcsp * (months / 12.0)
         
         # 2. Scale up if advance premium tax credit reported is larger than SLCSP
-        aptc = tax_unit("niti_advance_premium_tax_credit", period)
         ptc_benchmark = np.maximum(ptc_benchmark, aptc)
         
         # 3. Required contribution for the period
