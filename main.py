@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from contextlib import asynccontextmanager
 from niti_core import run_simulation, VariableRequest, TraceConfig, Simulation, warmup_simulation_cache
+from prometheus_client import multiprocess, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST, Histogram
 
 from logging_utils import user_id_ctx, request_id_ctx
 import uuid
@@ -30,6 +31,7 @@ POLICYENGINE_US_VERSION = get_policyengine_us_version()
 GC_CALCULATE_THRESHOLD2 = int(os.environ.get("GC_CALCULATE_THRESHOLD2", "25"))
 GC_CALCULATE_THRESHOLD1 = int(os.environ.get("GC_CALCULATE_THRESHOLD1", "5"))
 GC_HEALTH_THRESHOLD = int(os.environ.get("GC_HEALTH_THRESHOLD", "120"))
+PROMETHEUS_MULTIPROC_DIR = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
 
 calculate_counter = 0
 health_counter = 0
@@ -75,8 +77,8 @@ async def cleanup_memory_task(is_calculate: bool):
 
 logger = logging.getLogger(__name__)
 
-# Prometheus Metrics instrumentation
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, Histogram
+if PROMETHEUS_MULTIPROC_DIR:
+    os.makedirs(PROMETHEUS_MULTIPROC_DIR, exist_ok=True)
 
 HTTP_REQUEST_DURATION = Histogram(
     "http_request_duration_seconds",
@@ -180,6 +182,10 @@ async def health_check(background_tasks: BackgroundTasks):
 
 @app.get("/metrics")
 async def metrics():
+    if PROMETHEUS_MULTIPROC_DIR:
+        registry = CollectorRegistry()
+        multiprocess.MultiProcessCollector(registry)
+        return Response(content=generate_latest(registry), media_type=CONTENT_TYPE_LATEST)
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 @app.post("/calculate", response_model=CalculateResponse)
