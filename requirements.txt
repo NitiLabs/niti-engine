@@ -1,7 +1,7 @@
 fastapi==0.135.1
 uvicorn==0.41.0
 uvloop==0.22.1
-policyengine-us==2.117.7 # 11/12/2026
+policyengine-us==2.118.10 # 11/13/2026
 pydantic==2.13.4
 numpy==2.4.2
 prometheus-client==0.25.0
