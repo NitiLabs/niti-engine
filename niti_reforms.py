@@ -158,7 +158,17 @@ class niti_aca_premium_tax_credit(Variable):
     def formula(tax_unit, period, parameters):
         months = tax_unit("niti_aca_enrolled_months", period)
         aptc = tax_unit("niti_advance_premium_tax_credit", period)
-        
+        premium_paid = tax_unit("niti_aca_yearly_premium_paid", period)
+        annual_plan_premium = premium_paid + aptc
+
+        # Fast path: zero months or zero total plan premium always yields 0 PTC.
+        if not np.any((months > 0) & (annual_plan_premium > 0)):
+            return np.zeros_like(aptc)
+
+        has_enrolled_member = tax_unit.sum(tax_unit.members("pays_aca_premium", period)) > 0
+        if not np.any(has_enrolled_member & (months > 0) & (annual_plan_premium > 0)):
+            return np.zeros_like(aptc)
+
         # Check if anyone in the tax unit is eligible for PTC:
         # 1. Standard PolicyEngine eligibility
         standard_eligible = tax_unit.sum(tax_unit.members("is_aca_ptc_eligible", period)) > 0
@@ -168,7 +178,6 @@ class niti_aca_premium_tax_credit(Variable):
         # based on an initial estimate of >= 100% FPL are treated as eligible applicable taxpayers
         # even if their actual year-end income is below 100% FPL.
         # Note: Married Filing Separately is still disqualified from PTC.
-        has_enrolled_member = tax_unit.sum(tax_unit.members("pays_aca_premium", period)) > 0
         is_mfs = tax_unit("filing_status", period) == filing_status.possible_values.SEPARATE
         fpl_pct = tax_unit("aca_magi_fraction", period)
         below_100_fpl_safe_harbor = has_enrolled_member & ~is_mfs & (fpl_pct < 1.0) & (aptc > 0)
@@ -191,8 +200,6 @@ class niti_aca_premium_tax_credit(Variable):
         total_gross_ptc = np.maximum(0.0, ptc_benchmark - contribution_for_period)
         
         # 4. Cap at total premium price (paid + advance)
-        premium_paid = tax_unit("niti_aca_yearly_premium_paid", period)
-        annual_plan_premium = premium_paid + aptc
         total_gross_ptc = np.minimum(total_gross_ptc, annual_plan_premium)
         
         # ACA eligibility depends on enrolled months > 0 and having eligible members
@@ -209,15 +216,16 @@ class niti_net_aca_tax(Variable):
         gross_ptc = tax_unit("niti_aca_premium_tax_credit", period)
         aptc = tax_unit("niti_advance_premium_tax_credit", period)
         
-        # Negative tax impact (refund)
-        refund_impact = aptc - gross_ptc
+        # Positive when APTC exceeds gross PTC (repayment owed); <= 0 when a refund is due or balanced.
+        net_aca_diff = aptc - gross_ptc
+        if not np.any(gross_ptc < aptc):
+            return net_aca_diff
         
-        # Positive tax impact (repayment capped by limit)
+        # Repayment owed is capped by the statutory repayment limit (and cannot exceed APTC received).
         repayment_limit = tax_unit("niti_aca_repayment_limit", period)
-        raw_repayment = aptc - gross_ptc
-        repayment_impact = np.minimum(aptc, np.minimum(raw_repayment, repayment_limit))
+        repayment_impact = np.minimum(aptc, np.minimum(net_aca_diff, repayment_limit))
         
-        return np.where(gross_ptc < aptc, repayment_impact, refund_impact)
+        return np.where(gross_ptc < aptc, repayment_impact, net_aca_diff)
 
 
 for var_class in [
