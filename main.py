@@ -35,6 +35,8 @@ GC_CALCULATE_THRESHOLD2 = int(os.environ.get("GC_CALCULATE_THRESHOLD2", "25"))
 GC_CALCULATE_THRESHOLD1 = int(os.environ.get("GC_CALCULATE_THRESHOLD1", "5"))
 GC_IDLE_DELAY_SECONDS = float(os.environ.get("GC_IDLE_DELAY_SECONDS", "1.0"))
 GC_PERIODIC_FULL_INTERVAL_SECONDS = float(os.environ.get("GC_PERIODIC_FULL_INTERVAL_SECONDS", "3600"))
+SLOW_CALCULATE_THRESHOLD_MS = float(os.environ.get("SLOW_CALCULATE_THRESHOLD_MS", "400"))
+LOG_LEVEL = (os.environ.get("LOG_LEVEL") or "INFO").strip().upper()
 PROMETHEUS_MULTIPROC_DIR = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
 
 _GC_TYPE_LABELS = {
@@ -219,6 +221,7 @@ class GCManager:
 gc_manager = GCManager()
 
 logger = logging.getLogger(__name__)
+logger.setLevel(LOG_LEVEL)
 
 if PROMETHEUS_MULTIPROC_DIR:
     os.makedirs(PROMETHEUS_MULTIPROC_DIR, exist_ok=True)
@@ -348,6 +351,7 @@ def _execute_simulation(
     core_trace: Optional[TraceConfig],
     profile: bool,
 ) -> tuple[dict[str, list[Any]], Optional[dict]]:
+    start = time.perf_counter()
     pr = None
     if profile:
         import cProfile, pstats
@@ -379,6 +383,13 @@ def _execute_simulation(
             except Exception:
                 pass
         raise
+    finally:
+        compute_ms = (time.perf_counter() - start) * 1000
+        if compute_ms > SLOW_CALCULATE_THRESHOLD_MS and logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                f"Slow calculate request ({compute_ms:.2f}ms > {SLOW_CALCULATE_THRESHOLD_MS:.0f}ms): "
+                f"year={year}, situation={situation}, variables={core_vars}, trace_config={core_trace}"
+            )
 
 @app.post("/calculate", response_model=CalculateResponse)
 async def calculate_endpoint(req: CalculateRequest, request: Request):
@@ -398,9 +409,7 @@ async def calculate_endpoint(req: CalculateRequest, request: Request):
                 enabled=req.trace_config.enabled,
                 roots=tuple(req.trace_config.roots)
             )
-            
-        logger.debug(f"Queueing simulation for year {req.year}, situation={req.situation} with variables={core_vars} and trace_config={core_trace}")
-        
+
         gc_manager.on_calculate_start()
         try:
             arrays_serializable, trace = await run_in_sim_executor(
