@@ -5,7 +5,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from typing import Optional, Any
-from fastapi import FastAPI, HTTPException, Request, BackgroundTasks, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from contextlib import asynccontextmanager
@@ -33,11 +33,15 @@ POLICYENGINE_US_VERSION = get_policyengine_us_version()
 
 GC_CALCULATE_THRESHOLD2 = int(os.environ.get("GC_CALCULATE_THRESHOLD2", "25"))
 GC_CALCULATE_THRESHOLD1 = int(os.environ.get("GC_CALCULATE_THRESHOLD1", "5"))
-GC_HEALTH_THRESHOLD = int(os.environ.get("GC_HEALTH_THRESHOLD", "120"))
+GC_IDLE_DELAY_SECONDS = float(os.environ.get("GC_IDLE_DELAY_SECONDS", "1.0"))
+GC_PERIODIC_FULL_INTERVAL_SECONDS = float(os.environ.get("GC_PERIODIC_FULL_INTERVAL_SECONDS", "3600"))
 PROMETHEUS_MULTIPROC_DIR = os.environ.get("PROMETHEUS_MULTIPROC_DIR")
 
-calculate_counter = 0
-health_counter = 0
+_GC_TYPE_LABELS = {
+    0: "Gen 0 (Gen 0)",
+    1: "Gen 1 (Gen 0-1)",
+    2: "Full (Gen 0-2)",
+}
 
 # Single-worker executor serializes all PolicyEngine simulations and manual GC
 # onto one pinned OS thread (PolicyEngine is not thread-safe) while keeping the
@@ -52,47 +56,167 @@ async def run_in_sim_executor(fn, *args, **kwargs):
         functools.partial(ctx.run, fn, *args, **kwargs),
     )
 
-def _cleanup_memory_sync(is_calculate: bool):
-    global calculate_counter, health_counter
+def _collect_gc_sync(gen: int) -> float:
     start = time.perf_counter()
-    gc_type = None
-    
-    if is_calculate:
-        calculate_counter += 1
-        if calculate_counter % GC_CALCULATE_THRESHOLD1 == 0:
-            gc.collect(1)  # Gen 1 GC (Gen 0-1)
-            gc_type = "Gen 1 (Gen 0-1)"
-        elif GC_CALCULATE_THRESHOLD2 > 0 and calculate_counter >= GC_CALCULATE_THRESHOLD2:
-            gc.collect()  # Full GC (Gen 2)
-            calculate_counter = 0
-            health_counter = 0
-            gc_type = "Full (Gen 0-2)"
+    gc.collect(gen)
+    return (time.perf_counter() - start) * 1000
+
+class GCManager:
+    """Debounces and coalesces manual GC onto sim_executor.
+
+    All state lives on the asyncio event loop:
+    - Waits GC_IDLE_DELAY_SECONDS after the last in-flight /calculate finishes
+      so multi-request flows aren't interrupted by GC between calls.
+    - Coalesces pending GC needs, with higher generations overriding lower ones
+      (Gen 2 > Gen 1 > Gen 0).
+    - Forces immediate GC if uncollected calculations reach GC_CALCULATE_THRESHOLD2
+      so sustained traffic with no idle gaps cannot defer GC indefinitely.
+    - Runs a periodic Full (Gen 0-2) GC if GC_PERIODIC_FULL_INTERVAL_SECONDS elapses
+      without one.
+    """
+    def __init__(self) -> None:
+        self.calculate_counter = 0
+        self.uncollected_calculates = 0
+        self._in_flight = 0
+        self._pending_gen: Optional[int] = None
+        self._pending_triggers: set[str] = set()
+        self._gc_running = False
+        self._idle_timer: Optional[asyncio.TimerHandle] = None
+        self._periodic_task: Optional[asyncio.Task] = None
+        self._gc_task: Optional[asyncio.Task] = None
+        self._last_full_gc_time = time.monotonic()
+
+    def start(self) -> None:
+        self._last_full_gc_time = time.monotonic()
+        if GC_PERIODIC_FULL_INTERVAL_SECONDS > 0:
+            self._periodic_task = asyncio.create_task(
+                self._periodic_full_gc_loop(),
+                context=contextvars.Context(),
+            )
+
+    async def stop(self) -> None:
+        self._cancel_idle_timer()
+        for task in (self._periodic_task, self._gc_task):
+            if task is not None and not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._periodic_task = None
+        self._gc_task = None
+
+    def _cancel_idle_timer(self) -> None:
+        if self._idle_timer is not None:
+            self._idle_timer.cancel()
+            self._idle_timer = None
+
+    def on_calculate_start(self) -> None:
+        self._in_flight += 1
+        self._cancel_idle_timer()
+
+    def on_calculate_end(self) -> None:
+        self._in_flight = max(0, self._in_flight - 1)
+        self.calculate_counter += 1
+        self.uncollected_calculates += 1
+        if GC_CALCULATE_THRESHOLD2 > 0 and self.calculate_counter >= GC_CALCULATE_THRESHOLD2:
+            needed_gen = 2
+            self.calculate_counter = 0
+        elif GC_CALCULATE_THRESHOLD1 > 0 and self.calculate_counter % GC_CALCULATE_THRESHOLD1 == 0:
+            needed_gen = 1
         else:
-            gc.collect(0)  # Gen 0 GC (Gen 0)
-            gc_type = "Gen 0 (Gen 0)"
-    else:
-        health_counter += 1
-        if health_counter >= GC_HEALTH_THRESHOLD:
-            gc.collect()  # Full GC (Gen 2)
-            calculate_counter = 0
-            health_counter = 0
-            gc_type = "Full (Gen 0-2)"
-            
-    if gc_type:
-        duration_ms = (time.perf_counter() - start) * 1000
-        trigger_type = "calculate" if is_calculate else "health"
-        logger.info(
-            f"Garbage collection ({gc_type}) triggered by {trigger_type} "
-            f"completed in {duration_ms:.2f}ms. "
-            f"Counters: calc={calculate_counter}, health={health_counter}"
+            needed_gen = 0
+        self._merge_need(needed_gen, "calculate")
+
+        # Under sustained traffic with no idle gap, bound memory by forcing GC once
+        # uncollected calculations reach GC_CALCULATE_THRESHOLD2.
+        if GC_CALCULATE_THRESHOLD2 > 0 and self.uncollected_calculates >= GC_CALCULATE_THRESHOLD2:
+            self._cancel_idle_timer()
+            self._dispatch_gc()
+        elif self._in_flight == 0:
+            self._arm_idle_timer()
+
+    def _merge_need(self, gen: int, trigger: str) -> None:
+        if self._pending_gen is None or gen > self._pending_gen:
+            self._pending_gen = gen
+        self._pending_triggers.add(trigger)
+
+    def _arm_idle_timer(self) -> None:
+        self._cancel_idle_timer()
+        if GC_IDLE_DELAY_SECONDS <= 0:
+            self._dispatch_gc()
+            return
+        loop = asyncio.get_running_loop()
+        self._idle_timer = loop.call_later(
+            GC_IDLE_DELAY_SECONDS,
+            self._on_idle_timer,
+            context=contextvars.Context(),
         )
 
-async def cleanup_memory_task(is_calculate: bool):
-    if not is_calculate and GC_HEALTH_THRESHOLD <= 0:
-        return
-    if sim_executor is None:
-        return
-    await run_in_sim_executor(_cleanup_memory_sync, is_calculate)
+    def _on_idle_timer(self) -> None:
+        self._idle_timer = None
+        if self._in_flight == 0 and self._pending_gen is not None:
+            self._dispatch_gc()
+
+    def _dispatch_gc(self) -> None:
+        if self._gc_running or self._pending_gen is None or sim_executor is None:
+            return
+        self._gc_running = True
+        self._gc_task = asyncio.create_task(
+            self._run_gc(),
+            context=contextvars.Context(),
+        )
+
+    async def _run_gc(self) -> None:
+        try:
+            if sim_executor is None or self._pending_gen is None:
+                return
+            gen = self._pending_gen
+            triggers = "+".join(sorted(self._pending_triggers))
+            collected_calcs = self.uncollected_calculates
+            self._pending_gen = None
+            self._pending_triggers.clear()
+            self.uncollected_calculates = 0
+            if gen == 2:
+                self.calculate_counter = 0
+
+            duration_ms = await run_in_sim_executor(_collect_gc_sync, gen)
+            if gen == 2:
+                self._last_full_gc_time = time.monotonic()
+            logger.info(
+                f"Garbage collection ({_GC_TYPE_LABELS[gen]}) triggered by {triggers} "
+                f"completed in {duration_ms:.2f}ms. "
+                f"Counters: calc={self.calculate_counter}, collected_calcs={collected_calcs}"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Error during garbage collection")
+        finally:
+            self._gc_running = False
+            self._gc_task = None
+            if self._pending_gen is not None and self._in_flight == 0 and self._idle_timer is None:
+                self._arm_idle_timer()
+
+    async def _periodic_full_gc_loop(self) -> None:
+        while True:
+            elapsed = time.monotonic() - self._last_full_gc_time
+            sleep_for = GC_PERIODIC_FULL_INTERVAL_SECONDS - elapsed
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
+                continue
+
+            self._merge_need(2, "periodic")
+            if self._in_flight == 0:
+                self._cancel_idle_timer()
+                self._dispatch_gc()
+
+            if self._gc_task is not None:
+                await asyncio.shield(self._gc_task)
+            else:
+                await asyncio.sleep(min(1.0, GC_PERIODIC_FULL_INTERVAL_SECONDS))
+
+gc_manager = GCManager()
 
 logger = logging.getLogger(__name__)
 
@@ -128,9 +252,12 @@ async def lifespan(app: FastAPI):
         logger.info("Warmup and gc.freeze() complete.")
     except Exception:
         logger.exception("Failed to warm up simulation")
+
+    gc_manager.start()
     try:
         yield
     finally:
+        await gc_manager.stop()
         if sim_executor is not None:
             sim_executor.shutdown(wait=True)
             sim_executor = None
@@ -200,8 +327,7 @@ class CalculateResponse(BaseModel):
     trace: Optional[dict] = None
 
 @app.get("/health")
-async def health_check(background_tasks: BackgroundTasks):
-    background_tasks.add_task(cleanup_memory_task, False)
+async def health_check():
     return {
         "status": "ok",
         "pe_version": POLICYENGINE_US_VERSION,
@@ -255,7 +381,7 @@ def _execute_simulation(
         raise
 
 @app.post("/calculate", response_model=CalculateResponse)
-async def calculate_endpoint(req: CalculateRequest, background_tasks: BackgroundTasks, request: Request):
+async def calculate_endpoint(req: CalculateRequest, request: Request):
     profile = request.headers.get("X-Profile") == "true"
 
     try:
@@ -275,16 +401,18 @@ async def calculate_endpoint(req: CalculateRequest, background_tasks: Background
             
         logger.debug(f"Queueing simulation for year {req.year}, situation={req.situation} with variables={core_vars} and trace_config={core_trace}")
         
-        arrays_serializable, trace = await run_in_sim_executor(
-            _execute_simulation,
-            req.situation,
-            core_vars,
-            req.year,
-            core_trace,
-            profile,
-        )
-        
-        background_tasks.add_task(cleanup_memory_task, True)
+        gc_manager.on_calculate_start()
+        try:
+            arrays_serializable, trace = await run_in_sim_executor(
+                _execute_simulation,
+                req.situation,
+                core_vars,
+                req.year,
+                core_trace,
+                profile,
+            )
+        finally:
+            gc_manager.on_calculate_end()
 
         return CalculateResponse(
             arrays=arrays_serializable,
