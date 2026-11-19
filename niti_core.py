@@ -4,18 +4,12 @@ niti_core: Optimized version of PolicyEngine for household use case.
 
 import logging
 import time
-from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional
 
 # ── PolicyEngine imports (isolated here) ─────────────────────────────────
-import inspect
-import textwrap
 from policyengine_us import Simulation
 import policyengine_us.system as _pe_system_mod
-from policyengine_core.simulations.simulation import Simulation as _CoreSimulation
-from policyengine_core.simulations.simulation_builder import SimulationBuilder as _SimulationBuilder
-from policyengine_core.simulations.simulation_macro_cache import SimulationMacroCache
 
 import niti_reforms  # noqa: F401  – registers custom ACA variable globally
 from policyengine_us.system import system
@@ -62,69 +56,6 @@ if "mi_surtax" not in system.variables:
     _mi_surtax_reform.apply(system)
 
 _pe_system_mod.create_structural_reforms_from_parameters = lambda parameters, start_instant: None
-
-
-# 3. Avoid eager creation of ~7,786 empty Holders in input_variables discovery.
-# https://github.com/PolicyEngine/policyengine-core/issues/662
-# Both SimulationBuilder.build_from_dict and CoreSimulation.__init__ call get_holder(v.name)
-# for every variable in the system, defeating lazy holder creation and inflating Simulation.clone().
-def _patch_lazy_input_variables():
-    old_core_loop = (
-        "        self.input_variables = [\n"
-        "            variable.name\n"
-        "            for variable in self.tax_benefit_system.variables.values()\n"
-        "            if len(self.get_holder(variable.name).get_known_periods()) > 0\n"
-        "        ]"
-    )
-    new_core_loop = (
-        "        self.input_variables = [\n"
-        "            name\n"
-        "            for pop in self.populations.values()\n"
-        "            for name, holder in pop._holders.items()\n"
-        "            if len(holder.get_known_periods()) > 0\n"
-        "        ]"
-    )
-    core_src = inspect.getsource(_CoreSimulation.__init__)
-    if old_core_loop not in core_src:
-        raise RuntimeError("Failed to patch CoreSimulation.__init__: expected input_variables loop not found.")
-    core_ns = _CoreSimulation.__init__.__globals__.copy()
-    exec(textwrap.dedent(core_src.replace(old_core_loop, new_core_loop, 1)), core_ns)
-    _CoreSimulation.__init__ = core_ns["__init__"]
-
-    old_builder_loop = (
-        "        simulation.input_variables = [\n"
-        "            variable.name\n"
-        "            for variable in simulation.tax_benefit_system.variables.values()\n"
-        "            if len(simulation.get_holder(variable.name).get_known_periods()) > 0\n"
-        "        ]"
-    )
-    new_builder_loop = (
-        "        simulation.input_variables = [\n"
-        "            name\n"
-        "            for pop in simulation.populations.values()\n"
-        "            for name, holder in pop._holders.items()\n"
-        "            if len(holder.get_known_periods()) > 0\n"
-        "        ]"
-    )
-    wrapped_build = getattr(_SimulationBuilder.build_from_dict, "__wrapped__", None)
-    target_build = wrapped_build if wrapped_build is not None else _SimulationBuilder.build_from_dict
-    builder_src = inspect.getsource(target_build)
-    if old_builder_loop not in builder_src:
-        raise RuntimeError("Failed to patch SimulationBuilder.build_from_dict: expected input_variables loop not found.")
-    builder_ns = target_build.__globals__.copy()
-    exec(textwrap.dedent(builder_src.replace(old_builder_loop, new_builder_loop, 1)), builder_ns)
-    patched_build = builder_ns["build_from_dict"]
-    if wrapped_build is not None:
-        for cell in _SimulationBuilder.build_from_dict.__closure__ or ():
-            if cell.cell_contents is wrapped_build:
-                cell.cell_contents = patched_build
-                break
-        else:
-            raise RuntimeError("Failed to patch SimulationBuilder.build_from_dict: closure cell not found.")
-    else:
-        _SimulationBuilder.build_from_dict = patched_build
-
-_patch_lazy_input_variables()
 
 
 # ── Public data structures ───────────────────────────────────────────────
