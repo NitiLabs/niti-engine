@@ -3,6 +3,10 @@ FROM python:3.14.5-slim-trixie AS base
 
 WORKDIR /app
 
+# Install curl for lightweight container health checks
+RUN apt-get update && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
+
 # Prevent Python from writing .pyc files to disk
 ENV PYTHONDONTWRITEBYTECODE=1
 # Prevent Python from buffering stdout/stderr (real-time logging)
