@@ -242,42 +242,54 @@ def _filter_trace(
     return {k: v for k, v in full_trace.items() if k in reachable}
 
 
-def warmup_simulation_cache():
-    """Run a comprehensive warmup simulation for representative years (2025, 2026, 2027)
+DEFAULT_WARMUP_YEARS = (2026, 2027, 2025)
+
+_WARMUP_VARIABLES = (
+    'income_tax',
+    'niti_aca_repayment_limit',
+    'niti_aca_premium_tax_credit',
+    'niti_net_aca_tax',
+    'aca_magi',
+    'aca_required_contribution_percentage',
+    'slcsp',
+    'gross_medicare_part_b_premium',
+    'base_part_b_premium',
+    'income_adjusted_part_d_premium_surcharge',
+    'ca_income_tax',
+)
+
+_TAX_UNIT_MAPPED_VARS = frozenset({
+    'gross_medicare_part_b_premium',
+    'base_part_b_premium',
+    'income_adjusted_part_d_premium_surcharge',
+})
+
+
+def warmup_simulation_year(year: int) -> None:
+    """Run a warmup simulation for a single tax year to prime NumExpr JIT and lazy caches."""
+    year_str = str(year)
+    warmup_situation = {
+        'people': {'p': {'age': {year_str: 45}, 'employment_income': {year_str: 10000.0}}},
+        'tax_units': {'t': {'members': ['p'], 'filing_status': {year_str: 'SINGLE'}}},
+        'families': {'f': {'members': ['p']}},
+        'households': {'h': {'members': ['p'], 'state_code': {year_str: 'CA'}, 'county_fips': {year_str: '06085'}}},
+    }
+
+    sim = Simulation(situation=warmup_situation, tax_benefit_system=system)
+
+    for var_name in _WARMUP_VARIABLES:
+        if var_name in system.variables:
+            kwargs = {"map_to": "tax_unit"} if var_name in _TAX_UNIT_MAPPED_VARS else {}
+            try:
+                sim.calculate(var_name, year, **kwargs)
+            except Exception:
+                pass
+
+
+def warmup_simulation_cache(years: tuple[int, ...] = DEFAULT_WARMUP_YEARS) -> None:
+    """Run a comprehensive warmup simulation for representative years
     to force NumExpr JIT compilation and lazy-loading of parameters, geography datasets,
     and state/ACA variables.
     """
-    for year in (2025, 2026, 2027):
-        year_str = str(year)
-        warmup_situation = {
-            'people': {'p': {'age': {year_str: 45}, 'employment_income': {year_str: 10000.0}}},
-            'tax_units': {'t': {'members': ['p'], 'filing_status': {year_str: 'SINGLE'}}},
-            'families': {'f': {'members': ['p']}},
-            'households': {'h': {'members': ['p'], 'state_code': {year_str: 'CA'}, 'county_fips': {year_str: '06085'}}}
-        }
-        
-        sim = Simulation(situation=warmup_situation, tax_benefit_system=system)
-        
-        warmup_variables = [
-            'income_tax',
-            'niti_aca_repayment_limit',
-            'niti_aca_premium_tax_credit',
-            'niti_net_aca_tax',
-            'aca_magi',
-            'aca_required_contribution_percentage',
-            'slcsp',
-            'gross_medicare_part_b_premium',
-            'base_part_b_premium',
-            'income_adjusted_part_d_premium_surcharge',
-            'ca_income_tax'
-        ]
-        
-        for var_name in warmup_variables:
-            if var_name in system.variables:
-                kwargs = {}
-                if var_name in ('gross_medicare_part_b_premium', 'base_part_b_premium', 'income_adjusted_part_d_premium_surcharge'):
-                    kwargs["map_to"] = "tax_unit"
-                try:
-                    sim.calculate(var_name, year, **kwargs)
-                except Exception:
-                    pass
+    for year in years:
+        warmup_simulation_year(year)

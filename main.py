@@ -9,7 +9,14 @@ from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from contextlib import asynccontextmanager
-from niti_core import run_simulation, VariableRequest, TraceConfig, Simulation, warmup_simulation_cache
+from niti_core import (
+    DEFAULT_WARMUP_YEARS,
+    Simulation,
+    TraceConfig,
+    VariableRequest,
+    run_simulation,
+    warmup_simulation_year,
+)
 from prometheus_client import multiprocess, CollectorRegistry, generate_latest, CONTENT_TYPE_LATEST, Histogram
 
 from logging_utils import user_id_ctx, request_id_ctx
@@ -232,11 +239,35 @@ HTTP_REQUEST_DURATION = Histogram(
     ["method", "endpoint", "status"]
 )
 
-def _warmup_and_freeze():
-    warmup_simulation_cache()
+def _collect_and_freeze() -> None:
     gc.collect(2)
     # Freeze the loaded objects to speed up future gen 2 GCs.
     gc.freeze()
+
+
+async def _run_background_warmup() -> None:
+    """Warm up each representative tax year in its own executor task so incoming
+    /calculate requests can interleave between years instead of waiting for all years.
+    """
+    start = time.perf_counter()
+    logger.info(f"Starting background PolicyEngine simulation warmup for years {DEFAULT_WARMUP_YEARS}...")
+    try:
+        for year in DEFAULT_WARMUP_YEARS:
+            if sim_executor is None:
+                return
+            year_start = time.perf_counter()
+            await run_in_sim_executor(warmup_simulation_year, year)
+            logger.info(f"Warmed up PolicyEngine cache for {year} in {(time.perf_counter() - year_start) * 1000:.2f}ms.")
+        if sim_executor is None:
+            return
+        await run_in_sim_executor(_collect_and_freeze)
+        logger.info(f"Background warmup and gc.freeze() complete in {(time.perf_counter() - start) * 1000:.2f}ms.")
+    except asyncio.CancelledError:
+        logger.info("Background warmup cancelled during shutdown.")
+        raise
+    except Exception:
+        logger.exception("Failed to warm up simulation")
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -247,19 +278,20 @@ async def lifespan(app: FastAPI):
     logger.info(f"policyengine-us version: {POLICYENGINE_US_VERSION}")
 
     sim_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="niti-sim")
-    
-    # Warm up PolicyEngine on the dedicated simulation thread so the first real API request is sub-0.3s
-    logger.info("Warming up PolicyEngine simulation cache...")
-    try:
-        await run_in_sim_executor(_warmup_and_freeze)
-        logger.info("Warmup and gc.freeze() complete.")
-    except Exception:
-        logger.exception("Failed to warm up simulation")
 
+    # Run warmup in the background so uvicorn starts listening and passes /health immediately;
+    # any early /calculate requests queue cleanly behind the active warmup year on sim_executor.
+    warmup_task = asyncio.create_task(_run_background_warmup(), context=contextvars.Context())
     gc_manager.start()
     try:
         yield
     finally:
+        if not warmup_task.done():
+            warmup_task.cancel()
+            try:
+                await warmup_task
+            except asyncio.CancelledError:
+                pass
         await gc_manager.stop()
         if sim_executor is not None:
             sim_executor.shutdown(wait=True)
